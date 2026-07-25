@@ -5,7 +5,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { ThemeToggle } from "@/_components/layout/theme-toggle";
-import { Separator } from "@/_components/ui/separator";
 import { cn } from "@/lib/utils";
 
 const NAV = [
@@ -13,8 +12,13 @@ const NAV = [
   { href: "/vagas", label: "Vagas", icone: Briefcase },
 ];
 
+// Rotas fora do app: renderizam sem navegação.
+const ROUTES_WITHOUT_NAV = ["/login"];
+
 export function Sidebar() {
   const pathname = usePathname();
+
+  if (ROUTES_WITHOUT_NAV.includes(pathname)) return null;
 
   return (
     <aside className="flex h-svh w-60 shrink-0 flex-col justify-between border-r border-sidebar-border bg-sidebar px-4 py-5 text-sidebar-foreground">
