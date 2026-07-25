@@ -1,6 +1,7 @@
+import os
 from typing import List, Optional
 from uuid import UUID
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import Client
 
@@ -19,6 +20,14 @@ from app.models import (
     StatusEntrevistaEnum
 )
 from app.supabase_client import get_supabase_client
+from app.ai_services import (
+    transcrever_audio,
+    gerar_pergunta_inicial,
+    gerar_proxima_pergunta,
+    gerar_audio_voz,
+    avaliar_entrevista_completa
+)
+from app.storage_helper import upload_audio_to_supabase
 
 app = FastAPI(
     title="VoiceMatchAi API",
@@ -30,7 +39,7 @@ app = FastAPI(
 # Adjust origins in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins for development (front is on localhost:3000)
+    allow_origins=["*"],  # Allows all origins for development
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,7 +73,6 @@ def read_root():
 @app.post("/recrutadores", response_model=RecrutadorResponse, status_code=status.HTTP_201_CREATED)
 def criar_recrutador(data: RecrutadorRegister, db: Client = Depends(get_db)):
     try:
-        # 1. Create entry in table 'pessoa'
         pessoa_data = {
             "nome_completo": data.nome_completo,
             "email": data.email,
@@ -78,7 +86,6 @@ def criar_recrutador(data: RecrutadorRegister, db: Client = Depends(get_db)):
         
         pessoa_id = res_pessoa.data[0]["id"]
 
-        # 2. Create entry in table 'recrutador'
         recrutador_data = {
             "id": pessoa_id,
             "empresa": data.empresa,
@@ -86,7 +93,6 @@ def criar_recrutador(data: RecrutadorRegister, db: Client = Depends(get_db)):
         }
         res_recrutador = db.table("recrutador").insert(recrutador_data).execute()
         if not res_recrutador.data:
-            # Cleanup person if recruiter creation fails
             db.table("pessoa").delete().eq("id", pessoa_id).execute()
             raise HTTPException(status_code=400, detail="Erro ao criar registro do recrutador.")
 
@@ -95,7 +101,6 @@ def criar_recrutador(data: RecrutadorRegister, db: Client = Depends(get_db)):
         return recrutador_obj
 
     except Exception as e:
-        # Check if it's already an HTTPException
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=f"Erro interno no servidor: {str(e)}")
@@ -108,7 +113,6 @@ def criar_recrutador(data: RecrutadorRegister, db: Client = Depends(get_db)):
 @app.post("/candidatos", response_model=CandidatoResponse, status_code=status.HTTP_201_CREATED)
 def criar_candidato(data: CandidatoRegister, db: Client = Depends(get_db)):
     try:
-        # 1. Create entry in table 'pessoa'
         pessoa_data = {
             "nome_completo": data.nome_completo,
             "email": data.email,
@@ -122,7 +126,6 @@ def criar_candidato(data: CandidatoRegister, db: Client = Depends(get_db)):
         
         pessoa_id = res_pessoa.data[0]["id"]
 
-        # 2. Create entry in table 'candidato'
         candidato_data = {
             "id": pessoa_id,
             "curriculo_url": data.curriculo_url,
@@ -132,7 +135,6 @@ def criar_candidato(data: CandidatoRegister, db: Client = Depends(get_db)):
         }
         res_candidato = db.table("candidato").insert(candidato_data).execute()
         if not res_candidato.data:
-            # Cleanup person if candidate creation fails
             db.table("pessoa").delete().eq("id", pessoa_id).execute()
             raise HTTPException(status_code=400, detail="Erro ao criar registro do candidato.")
 
@@ -149,8 +151,6 @@ def criar_candidato(data: CandidatoRegister, db: Client = Depends(get_db)):
 @app.get("/candidatos", response_model=List[CandidatoResponse])
 def listar_candidatos(db: Client = Depends(get_db)):
     try:
-        # Fetch candidates and join with pessoa
-        # Supabase allows joins using relationship notation
         res = db.table("candidato").select("*, pessoa(*)").execute()
         return res.data
     except Exception as e:
@@ -214,7 +214,6 @@ def criar_vaga(vaga: VagaCreate, db: Client = Depends(get_db)):
 @app.post("/entrevistas/iniciar", response_model=EntrevistaResponse, status_code=status.HTTP_201_CREATED)
 def iniciar_entrevista(data: EntrevistaCreate, db: Client = Depends(get_db)):
     try:
-        # Check if interview already exists for this candidate and vacancy
         existing = db.table("entrevista")\
             .select("*")\
             .eq("vaga_id", str(data.vaga_id))\
@@ -222,22 +221,19 @@ def iniciar_entrevista(data: EntrevistaCreate, db: Client = Depends(get_db)):
             .execute()
         
         if existing.data:
-            return existing.data[0]  # Return existing interview instead of creating a duplicate
+            return existing.data[0]
 
-        # Create new interview
         entrevista_data = {
             "vaga_id": str(data.vaga_id),
             "candidato_id": str(data.candidato_id),
             "status": "em andamento",
-            "data_inicio": "now()"  # Postgres server timestamp helper
+            "data_inicio": "now()"
         }
         res = db.table("entrevista").insert(entrevista_data).execute()
         if not res.data:
             raise HTTPException(status_code=400, detail="Erro ao iniciar entrevista.")
         
-        # Increment number of applications (inscricoes) for the vacancy
         try:
-            # Get current vagas data to fetch current inscricoes
             vaga_res = db.table("vaga").select("inscricoes").eq("id", str(data.vaga_id)).execute()
             if vaga_res.data:
                 current_inscricoes = vaga_res.data[0].get("inscricoes") or 0
@@ -286,7 +282,6 @@ def listar_interacoes(entrevista_id: UUID, db: Client = Depends(get_db)):
 @app.post("/entrevistas/{entrevista_id}/interacoes", response_model=InteracaoEntrevistaResponse, status_code=status.HTTP_201_CREATED)
 def criar_interacao(entrevista_id: UUID, interacao: InteracaoEntrevistaCreate, db: Client = Depends(get_db)):
     try:
-        # Enforce path parameter consistency
         if interacao.entrevista_id != entrevista_id:
             raise HTTPException(
                 status_code=400,
@@ -301,3 +296,217 @@ def criar_interacao(entrevista_id: UUID, interacao: InteracaoEntrevistaCreate, d
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=f"Erro ao criar interação: {str(e)}")
+
+
+# ==========================================
+# Pipeline de Áudio e IA Direto na Web
+# ==========================================
+
+MAX_QUESTIONS = 5  # Número máximo de rodadas de perguntas da entrevista
+
+@app.post("/entrevistas/{entrevista_id}/iniciar-chat", response_model=InteracaoEntrevistaResponse)
+def iniciar_chat_entrevista(entrevista_id: UUID, db: Client = Depends(get_db)):
+    """
+    Gera a 1ª pergunta, gera a voz correspondente e salva a primeira interação na entrevista.
+    """
+    try:
+        # 1. Verifica se já existe uma interação de ordem 1 para esta entrevista
+        existing = db.table("interacao_entrevista")\
+            .select("*")\
+            .eq("entrevista_id", str(entrevista_id))\
+            .eq("ordem", 1)\
+            .execute()
+            
+        if existing.data:
+            return existing.data[0]
+            
+        # 2. Busca informações da vaga associada à entrevista
+        entrevista_res = db.table("entrevista").select("vaga_id").eq("id", str(entrevista_id)).execute()
+        if not entrevista_res.data:
+            raise HTTPException(status_code=404, detail="Entrevista não encontrada.")
+        vaga_id = entrevista_res.data[0]["vaga_id"]
+        
+        vaga_res = db.table("vaga").select("titulo, descricao").eq("id", vaga_id).execute()
+        vaga_titulo = "Vaga"
+        vaga_desc = ""
+        if vaga_res.data:
+            vaga_titulo = vaga_res.data[0].get("titulo", "Vaga")
+            vaga_desc = vaga_res.data[0].get("descricao", "")
+            
+        # 3. Roda IA para gerar a primeira pergunta
+        pergunta_texto = gerar_pergunta_inicial(vaga_titulo, vaga_desc)
+        
+        # 4. Converte a pergunta em áudio (TTS) via ElevenLabs
+        audio_bytes = gerar_audio_voz(pergunta_texto)
+        
+        # 5. Salva o áudio no Supabase Storage
+        file_name = f"pergunta_1_{entrevista_id}.mp3"
+        audio_url = upload_audio_to_supabase(audio_bytes, file_name)
+        
+        # 6. Registra no banco
+        interacao_data = {
+            "entrevista_id": str(entrevista_id),
+            "ordem": 1,
+            "pergunta_texto": pergunta_texto,
+            "pergunta_audio_url": audio_url,
+            "data_registro": "now()"
+        }
+        
+        res = db.table("interacao_entrevista").insert(interacao_data).execute()
+        if not res.data:
+            raise HTTPException(status_code=400, detail="Erro ao salvar a primeira pergunta da entrevista.")
+            
+        return res.data[0]
+        
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Erro ao iniciar o chat da entrevista: {str(e)}")
+
+
+@app.post("/entrevistas/{entrevista_id}/interacoes/{interacao_id}/responder")
+async def responder_interacao(
+    entrevista_id: UUID, 
+    interacao_id: UUID, 
+    audio_file: UploadFile = File(...), 
+    db: Client = Depends(get_db)
+):
+    """
+    Recebe a resposta em áudio do candidato, transcreve com Whisper, atualiza a interação atual
+    e gera a próxima pergunta (ou avalia e encerra se chegarmos no limite).
+    """
+    temp_file_path = f"temp_{interacao_id}.webm"
+    try:
+        # 1. Verifica se a interação existe e pertence à entrevista
+        interacao_res = db.table("interacao_entrevista")\
+            .select("*")\
+            .eq("id", str(interacao_id))\
+            .eq("entrevista_id", str(entrevista_id))\
+            .execute()
+            
+        if not interacao_res.data:
+            raise HTTPException(status_code=404, detail="Rodada de interação não encontrada.")
+        
+        interacao_atual = interacao_res.data[0]
+        ordem_atual = interacao_atual["ordem"]
+        
+        # 2. Lê e faz upload do áudio da resposta para o Supabase Storage
+        audio_bytes = await audio_file.read()
+        candidato_audio_url = upload_audio_to_supabase(
+            audio_bytes, 
+            f"resposta_{interacao_id}_{entrevista_id}.webm"
+        )
+        
+        # 3. Transcreve o áudio localmente via Whisper
+        with open(temp_file_path, "wb") as f:
+            f.write(audio_bytes)
+            
+        resposta_transcrita = transcrever_audio(temp_file_path)
+        
+        # Limpa arquivo temporário
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+            
+        # 4. Atualiza a interação atual com a resposta
+        db.table("interacao_entrevista")\
+            .update({
+                "resposta_texto": resposta_transcrita,
+                "resposta_audio_url": candidato_audio_url,
+                "status_audio": "valido",
+                "duracao_audio_segundos": 15  # Estático ou calculado no front
+            })\
+            .eq("id", str(interacao_id))\
+            .execute()
+            
+        # 5. Obtém histórico de toda a entrevista para formular a próxima ação da IA
+        historico_res = db.table("interacao_entrevista")\
+            .select("*")\
+            .eq("entrevista_id", str(entrevista_id))\
+            .order("ordem")\
+            .execute()
+            
+        historico = []
+        for inter in historico_res.data:
+            historico.append({"autor": "ia", "conteudo": inter["pergunta_texto"]})
+            if inter.get("resposta_texto"):
+                historico.append({"autor": "candidato", "conteudo": inter["resposta_texto"]})
+
+        # Busca detalhes da vaga
+        entrevista_res = db.table("entrevista").select("vaga_id, candidato_id").eq("id", str(entrevista_id)).execute()
+        vaga_id = entrevista_res.data[0]["vaga_id"]
+        candidato_id = entrevista_res.data[0]["candidato_id"]
+        vaga_res = db.table("vaga").select("titulo, descricao").eq("id", vaga_id).execute()
+        vaga_info = f"Vaga: {vaga_res.data[0]['titulo']}. Descrição: {vaga_res.data[0]['descricao']}" if vaga_res.data else ""
+
+        # 6. Avalia se a entrevista encerra ou continua
+        if ordem_atual >= MAX_QUESTIONS:
+            # --- FINALIZAR E AVALIAR ENTREVISTA ---
+            avaliacao = avaliar_entrevista_completa(historico, vaga_info)
+            
+            # Atualiza entrevista
+            feedback_ia = (
+                f"Pontos Fortes:\n" + "\n".join([f"- {p}" for p in avaliacao["pontosFortes"]]) + "\n\n"
+                f"Pontos a Desenvolver:\n" + "\n".join([f"- {p}" for p in avaliacao["pontosFracos"]])
+            )
+            db.table("entrevista")\
+                .update({
+                    "status": "concluída",
+                    "data_fim": "now()",
+                    "score_geral": avaliacao["notaFinal"],
+                    "feedback_recrutador": feedback_ia
+                })\
+                .eq("id", str(entrevista_id))\
+                .execute()
+                
+            # Atualiza tabela candidato com o perfil comportamental avaliado
+            db.table("candidato")\
+                .update({
+                    "perfil_avaliado": avaliacao["perfilAvaliado"],
+                    "nota_final": avaliacao["notaFinal"],
+                    "pontos_fortes": avaliacao["pontosFortes"],
+                    "pontos_fracos": avaliacao["pontosFracos"],
+                    "melhorias": avaliacao["melhorias"]
+                })\
+                .eq("id", candidato_id)\
+                .execute()
+                
+            return {
+                "finalizada": True,
+                "nota_final": avaliacao["notaFinal"],
+                "mensagem": "Entrevista concluída com sucesso. Obrigado!"
+            }
+            
+        else:
+            # --- CONTINUAR: GERAR PRÓXIMA PERGUNTA ---
+            proxima_ordem = ordem_atual + 1
+            proxima_pergunta = gerar_proxima_pergunta(historico, vaga_info)
+            
+            # TTS
+            audio_bytes = gerar_audio_voz(proxima_pergunta)
+            proxima_pergunta_audio_url = upload_audio_to_supabase(
+                audio_bytes, 
+                f"pergunta_{proxima_ordem}_{entrevista_id}.mp3"
+            )
+            
+            # Insere nova interação limpa aguardando resposta
+            nova_interacao_data = {
+                "entrevista_id": str(entrevista_id),
+                "ordem": proxima_ordem,
+                "pergunta_texto": proxima_pergunta,
+                "pergunta_audio_url": proxima_pergunta_audio_url,
+                "data_registro": "now()"
+            }
+            res_nova = db.table("interacao_entrevista").insert(nova_interacao_data).execute()
+            
+            return {
+                "finalizada": False,
+                "proxima_interacao": res_nova.data[0]
+            }
+
+    except Exception as e:
+        # Certifica-se de remover arquivo local de áudio se der erro
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Erro ao processar resposta da interação: {str(e)}")
