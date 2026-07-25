@@ -1,0 +1,74 @@
+# ==========================================
+# Variáveis de Ambiente e Segredos (CRÍTICO)
+# ==========================================
+.env
+.env.*
+!.env.example
+*.pem
+
+# ==========================================
+# Frontend / Node.js (Next.js, Vue, Express)
+# ==========================================
+node_modules/
+.pnp
+.pnp.js
+.next/
+out/
+build/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vercel/
+
+# ==========================================
+# Backend / Python (FastAPI, Flask)
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env/
+pip-log.txt
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ==========================================
+# Arquivos de Mídia e Uploads (Testes de Áudio)
+# ==========================================
+/uploads/
+/temp/
+/tmp/
+*.mp3
+*.wav
+*.webm
+*.ogg
+*.m4a
+
+# ==========================================
+# Banco de Dados Local (Caso utilize SQLite no dev)
+# ==========================================
+*.sqlite3
+*.db
+
+# ==========================================
+# Editores de Código e IDEs
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ==========================================
+# Sistema Operacional
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
